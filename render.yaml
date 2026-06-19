@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: traelo-bot-contable
     runtime: python
     buildCommand: pip install -r requirements.txt
@@ -12,5 +12,7 @@ services:
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
+        sync: false
+      - key: API_SECRET_KEY
         sync: false
     autoDeploy: true
