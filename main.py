@@ -34,31 +34,51 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 # ---------------------------------------------------------------------------
 
 def _fmt(n: int) -> str:
-    """Formatea un entero con separadores de miles."""
     return f"{n:,}".replace(",", ".")
 
 
 async def _es_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Devuelve True si el usuario que envió el mensaje es administrador del grupo."""
     try:
         miembro = await context.bot.get_chat_member(GROUP_ID, update.effective_user.id)
         return miembro.status in ("administrator", "creator")
     except Exception as e:
-        logger.warning(f"No se pudo verificar si el usuario es admin: {e}")
+        logger.warning(f"No se pudo verificar admin: {e}")
         return False
 
 
 def _solo_grupo(update: Update) -> bool:
-    """Devuelve True si el mensaje proviene del grupo configurado."""
     return update.effective_chat and update.effective_chat.id == GROUP_ID
 
 
 # ---------------------------------------------------------------------------
+# Handler de diagnóstico — loguea TODOS los updates que llegan
+# Se registra en group=999 (no interfiere con handlers normales)
+# ---------------------------------------------------------------------------
+
+async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    msg = update.effective_message
+    logger.info(
+        f"[DEBUG] UPDATE RECIBIDO — "
+        f"chat_id={chat.id if chat else 'N/A'} "
+        f"tipo={chat.type if chat else 'N/A'} "
+        f"GROUP_ID_configurado={GROUP_ID} "
+        f"coincide={chat.id == GROUP_ID if chat else False} "
+        f"texto={repr(msg.text[:80]) if msg and msg.text else 'N/A'}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler: mensajes del grupo (detectar pedidos)
+# ~filters.COMMAND excluye comandos para que los CommandHandlers los procesen
 # ---------------------------------------------------------------------------
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    logger.info(f"[handle_message] chat_id={chat.id if chat else 'N/A'}")
+
     if not _solo_grupo(update):
+        logger.info(f"[handle_message] Descartado — no es el grupo ({GROUP_ID})")
         return
 
     msg = update.message or update.channel_post
@@ -67,7 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     datos = parsear_pedido(msg.text)
     if not datos:
-        return  # No es un pedido, ignorar silenciosamente
+        return
 
     ahora = datetime.now()
     try:
@@ -90,8 +110,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------------------------
 
 async def cmd_mensajero(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _solo_grupo(update):
-        return
+    chat = update.effective_chat
+    logger.info(f"[/mensajero] chat_id={chat.id if chat else 'N/A'} GROUP_ID={GROUP_ID}")
+
+    # DIAGNÓSTICO: temporalmente desactivado el filtro de grupo
+    # if not _solo_grupo(update):
+    #     return
+
     if not await _es_admin(update, context):
         await update.message.reply_text("⛔ Solo los administradores pueden usar este comando.")
         return
@@ -133,8 +158,13 @@ async def cmd_mensajero(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # ---------------------------------------------------------------------------
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _solo_grupo(update):
-        return
+    chat = update.effective_chat
+    logger.info(f"[/stats] chat_id={chat.id if chat else 'N/A'} GROUP_ID={GROUP_ID} args={context.args}")
+
+    # DIAGNÓSTICO: temporalmente desactivado el filtro de grupo
+    # if not _solo_grupo(update):
+    #     return
+
     if not await _es_admin(update, context):
         await update.message.reply_text("⛔ Solo los administradores pueden usar este comando.")
         return
@@ -178,7 +208,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if not negocios:
                 await update.message.reply_text("No hay datos de negocios para este mes.")
                 return
-            lineas = [f"🏪 *Facturación por negocio (mes actual)*\n"]
+            lineas = ["🏪 *Facturación por negocio (mes actual)*\n"]
             for i, n in enumerate(negocios, 1):
                 lineas.append(f"{i}. {n['negocio']}: {_fmt(n['subtotal'])} CUP")
             await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
@@ -227,27 +257,33 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     db.init_db(SUPABASE_URL, SUPABASE_KEY)
 
+    logger.info(f"GROUP_ID configurado: {GROUP_ID}")
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # Escuchar todos los mensajes de texto del grupo (detectar pedidos)
+    # ~filters.COMMAND es la corrección clave: excluye comandos del MessageHandler
+    # para que los CommandHandlers puedan procesarlos en el mismo grupo (grupo 0)
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.Chat(GROUP_ID),
+            filters.TEXT & ~filters.COMMAND & filters.Chat(GROUP_ID),
             handle_message,
         )
     )
 
-    # Comandos
     app.add_handler(CommandHandler("mensajero", cmd_mensajero))
     app.add_handler(CommandHandler("stats", cmd_stats))
 
+    # Handler de diagnóstico — captura TODOS los updates sin interferir (group=999)
+    app.add_handler(MessageHandler(filters.ALL, debug_handler), group=999)
+
     logger.info("Bot contable iniciado. Escuchando pedidos...")
     app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
+        allowed_updates=["message", "edited_message", "channel_post",
+                         "edited_channel_post", "callback_query"],
         drop_pending_updates=True,
     )
 
