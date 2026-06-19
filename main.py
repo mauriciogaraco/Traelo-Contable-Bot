@@ -1,7 +1,8 @@
+import asyncio
 import logging
 import os
-from datetime import datetime
 
+import uvicorn
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -13,7 +14,7 @@ from telegram.ext import (
 )
 
 import database as db
-from parser import parsear_pedido
+from api import fastapi_app
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GROUP_ID = int(os.environ["TELEGRAM_GROUP_ID"])
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+PORT = int(os.environ.get("PORT", 8000))
 
 
 # ---------------------------------------------------------------------------
@@ -48,38 +50,6 @@ async def _es_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 def _solo_grupo(update: Update) -> bool:
     return update.effective_chat and update.effective_chat.id == GROUP_ID
-
-
-# ---------------------------------------------------------------------------
-# Handler: mensajes del grupo (detectar pedidos)
-# ---------------------------------------------------------------------------
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _solo_grupo(update):
-        return
-
-    msg = update.message or update.channel_post
-    if not msg or not msg.text:
-        return
-
-    datos = parsear_pedido(msg.text)
-    if not datos:
-        return
-
-    ahora = datetime.now()
-    try:
-        pedido_id = db.guardar_pedido(
-            datos=datos,
-            message_id=msg.message_id,
-            fecha=ahora.date(),
-            hora=ahora.strftime("%H:%M:%S"),
-        )
-        if pedido_id:
-            logger.info(
-                f"Pedido #{datos['numero_pedido']} registrado (message_id={msg.message_id})."
-            )
-    except Exception as e:
-        logger.error(f"Error al guardar pedido en Supabase: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +79,9 @@ async def cmd_mensajero(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     reply_msg_id = update.message.reply_to_message.message_id
 
     try:
-        numero_pedido = db.asignar_mensajero(reply_msg_id, nombre_mensajero)
+        numero_pedido = await asyncio.to_thread(
+            db.asignar_mensajero, reply_msg_id, nombre_mensajero
+        )
         if numero_pedido:
             await update.message.reply_text(
                 f"✅ Mensajero *{nombre_mensajero}* asignado al pedido *#{numero_pedido}*.",
@@ -151,7 +123,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         if subcomando == "hoy":
-            datos = db.stats_hoy()
+            datos = await asyncio.to_thread(db.stats_hoy)
             texto = (
                 f"📊 *Estadísticas de hoy*\n\n"
                 f"📦 Pedidos: {datos['pedidos']}\n"
@@ -161,7 +133,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(texto, parse_mode="Markdown")
 
         elif subcomando == "mes":
-            datos = db.stats_mes()
+            datos = await asyncio.to_thread(db.stats_mes)
             texto = (
                 f"📊 *Estadísticas del mes*\n\n"
                 f"📦 Pedidos: {datos['pedidos']}\n"
@@ -171,7 +143,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(texto, parse_mode="Markdown")
 
         elif subcomando == "negocios":
-            negocios = db.stats_negocios_mes()
+            negocios = await asyncio.to_thread(db.stats_negocios_mes)
             if not negocios:
                 await update.message.reply_text("No hay datos de negocios para este mes.")
                 return
@@ -185,7 +157,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await update.message.reply_text("Uso: /stats mensajero <nombre>")
                 return
             nombre = " ".join(context.args[1:])
-            datos = db.stats_mensajero_mes(nombre)
+            datos = await asyncio.to_thread(db.stats_mensajero_mes, nombre)
             texto = (
                 f"🛵 *Estadísticas de {nombre} (mes actual)*\n\n"
                 f"📦 Pedidos: {datos['pedidos']}\n"
@@ -194,7 +166,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(texto, parse_mode="Markdown")
 
         elif subcomando == "mensajeros":
-            mensajeros = db.stats_mensajeros_mes()
+            mensajeros = await asyncio.to_thread(db.stats_mensajeros_mes)
             if not mensajeros:
                 await update.message.reply_text("No hay datos de mensajeros para este mes.")
                 return
@@ -218,36 +190,44 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Arranque
+# Arranque — FastAPI + bot polling en el mismo event loop
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+async def run() -> None:
     db.init_db(SUPABASE_URL, SUPABASE_KEY)
 
-    app = (
+    # --- Bot ---
+    bot_app = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
+    bot_app.add_handler(CommandHandler("mensajero", cmd_mensajero))
+    bot_app.add_handler(CommandHandler("stats", cmd_stats))
 
-    # ~filters.COMMAND excluye comandos para que los CommandHandlers los procesen
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.Chat(GROUP_ID),
-            handle_message,
+    # --- Uvicorn ---
+    uvicorn_config = uvicorn.Config(
+        fastapi_app,
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info",
+    )
+    uvicorn_server = uvicorn.Server(uvicorn_config)
+
+    logger.info(f"Iniciando bot (grupo {GROUP_ID}) y API en puerto {PORT}...")
+
+    async with bot_app:
+        await bot_app.start()
+        await bot_app.updater.start_polling(
+            allowed_updates=["message", "edited_message", "channel_post", "edited_channel_post"],
+            drop_pending_updates=True,
         )
-    )
 
-    app.add_handler(CommandHandler("mensajero", cmd_mensajero))
-    app.add_handler(CommandHandler("stats", cmd_stats))
+        await uvicorn_server.serve()  # bloquea hasta Ctrl-C
 
-    logger.info(f"Bot contable iniciado. Escuchando grupo {GROUP_ID}...")
-    app.run_polling(
-        allowed_updates=["message", "edited_message", "channel_post",
-                         "edited_channel_post", "callback_query"],
-        drop_pending_updates=True,
-    )
+        await bot_app.updater.stop()
+        await bot_app.stop()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run())

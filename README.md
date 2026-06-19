@@ -1,61 +1,30 @@
 # Bot Contable — Tráelo
 
-Bot de Telegram que escucha los pedidos del grupo y lleva contabilidad automática en Supabase. No interfiere con el bot de pedidos existente.
+Bot de Telegram contable con dos modos en un solo proceso:
+
+1. **API HTTP** — recibe pedidos de tu sistema vía `POST /pedido`, los envía al grupo de Telegram y los guarda en Supabase.
+2. **Bot polling** — responde comandos `/stats` y `/mensajero` en el grupo.
 
 ---
 
-## Paso 1 — Crear el bot en BotFather
+## Variables de entorno
 
-1. Abre Telegram y busca `@BotFather`.
-2. Envía `/newbot`.
-3. Elige un nombre para el bot (ej. `Tráelo Contable`).
-4. Elige un username que termine en `bot` (ej. `traelo_contable_bot`).
-5. BotFather te dará un **token** con este formato: `123456789:ABCDefgh...`
-6. Guarda ese token — es tu `TELEGRAM_BOT_TOKEN`.
-
----
-
-## Paso 2 — Añadir el bot al grupo como administrador
-
-1. Abre el grupo en Telegram.
-2. Ve a **Configuración del grupo → Administradores → Añadir administrador**.
-3. Busca el username del bot que acabas de crear y agrégalo.
-4. Los permisos mínimos necesarios son: **Leer mensajes** (los bots los leen siempre) y **Enviar mensajes**.
-
-> El bot necesita ser admin para poder verificar si quien usa los comandos es admin del grupo.
+| Variable | Descripción |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Token del bot (BotFather) |
+| `TELEGRAM_GROUP_ID` | Chat ID del grupo (número negativo) |
+| `SUPABASE_URL` | URL del proyecto Supabase |
+| `SUPABASE_KEY` | Clave `anon` de Supabase |
+| `API_SECRET_KEY` | Token secreto para autenticar llamadas al endpoint |
+| `PORT` | Puerto HTTP (fps.ms lo inyecta automáticamente) |
 
 ---
 
-## Paso 3 — Obtener el CHAT_ID del grupo
+## Tablas en Supabase
 
-1. Añade temporalmente `@userinfobot` al grupo.
-2. Escribe cualquier mensaje en el grupo.
-3. `@userinfobot` responderá con el **Chat ID** del grupo (número negativo, ej. `-1001234567890`).
-4. Retira `@userinfobot` si quieres.
-5. Ese número negativo es tu `TELEGRAM_GROUP_ID`.
-
-**Alternativa:** Habla con `@RawDataBot` o envía un mensaje al grupo y revisa la URL si usas Telegram Web.
-
----
-
-## Paso 4 — Crear cuenta en Supabase (sin tarjeta)
-
-1. Ve a [https://supabase.com](https://supabase.com) y haz clic en **Start your project**.
-2. Regístrate con GitHub o email — no pide tarjeta de crédito.
-3. El plan gratuito incluye 500 MB de base de datos, más que suficiente.
-
----
-
-## Paso 5 — Crear el proyecto y las tablas
-
-1. En el dashboard de Supabase, haz clic en **New project**.
-2. Elige un nombre (ej. `traelo-contable`), una contraseña para la DB y la región más cercana.
-3. Espera ~1 minuto a que se cree el proyecto.
-4. Ve a **SQL Editor** (icono de terminal en el menú izquierdo).
-5. Pega y ejecuta este SQL:
+Ejecuta este SQL en **SQL Editor** de tu proyecto Supabase (solo si no existen):
 
 ```sql
--- Tabla principal de pedidos
 CREATE TABLE pedidos (
   id SERIAL PRIMARY KEY,
   numero_pedido TEXT,
@@ -69,7 +38,6 @@ CREATE TABLE pedidos (
   message_id BIGINT UNIQUE
 );
 
--- Tabla de negocios por pedido
 CREATE TABLE pedidos_negocios (
   id SERIAL PRIMARY KEY,
   pedido_id INTEGER REFERENCES pedidos(id),
@@ -78,104 +46,118 @@ CREATE TABLE pedidos_negocios (
 );
 ```
 
-6. Haz clic en **Run** (o Ctrl+Enter). Deberías ver "Success. No rows returned."
-
 ---
 
-## Paso 6 — Obtener SUPABASE_URL y SUPABASE_KEY
+## Endpoint POST /pedido
 
-1. En el menú de tu proyecto Supabase, ve a **Settings → API**.
-2. Copia la **Project URL** → es tu `SUPABASE_URL`.
-3. En la sección **Project API keys**, copia la clave `anon` `public` → es tu `SUPABASE_KEY`.
+### Autenticación
 
-> Usa la clave `anon`, NO la `service_role`. La anon es suficiente para este bot.
+Todas las llamadas deben incluir el header:
+```
+Authorization: Bearer <API_SECRET_KEY>
+```
 
----
+### Formato del JSON
 
-## Paso 7 — Subir el código a GitHub
+```json
+{
+  "numero_pedido": "4650",
+  "cliente": "Melissa López",
+  "direccion": "Ave 85 a # 9801 / 98 a y 100",
+  "referencia": "La misma calle de la entrada del cementerio",
+  "telefono": "54978740",
+  "entrega": "Lo antes posible",
+  "negocios": [
+    {
+      "nombre": "El Mercadito",
+      "items": [
+        {"producto": "Arroz 1kg", "cantidad": 2, "precio": 700},
+        {"producto": "Aceite (900 mL)", "cantidad": 2, "precio": 1600}
+      ],
+      "subtotal": 6700
+    }
+  ],
+  "mensajeria": 250,
+  "total": 6950
+}
+```
 
-El código debe estar en un repositorio de GitHub para que Render lo despliegue.
+### Ejemplo con curl
 
 ```bash
-git init
-git add .
-git commit -m "Bot contable Tráelo"
-git branch -M main
-git remote add origin https://github.com/TU_USUARIO/traelo-bot-contable.git
-git push -u origin main
+curl -X POST https://TU-SERVIDOR.fps.ms:PUERTO/pedido \
+  -H "Authorization: Bearer MI_API_SECRET_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "numero_pedido": "4650",
+    "cliente": "Melissa López",
+    "direccion": "Ave 85 a # 9801",
+    "telefono": "54978740",
+    "entrega": "Lo antes posible",
+    "negocios": [
+      {
+        "nombre": "El Mercadito",
+        "items": [{"producto": "Arroz 1kg", "cantidad": 2, "precio": 700}],
+        "subtotal": 1400
+      }
+    ],
+    "mensajeria": 250,
+    "total": 1650
+  }'
+```
+
+### Respuesta exitosa (200)
+
+```json
+{"ok": true, "numero_pedido": "4650", "message_id": 12345}
+```
+
+### Verificar que el servidor está vivo
+
+```bash
+curl https://TU-SERVIDOR.fps.ms:PUERTO/health
+# → {"status": "ok"}
 ```
 
 ---
 
-## Paso 8 — Deployar en Render.com como Background Worker
+## Comandos del bot en el grupo
 
-1. Ve a [https://render.com](https://render.com) y crea una cuenta gratuita.
-2. Haz clic en **New → Background Worker**.
-3. Conecta tu cuenta de GitHub y selecciona el repositorio del bot.
-4. Render detectará el `render.yaml` automáticamente. Si no:
-   - **Name:** `traelo-bot-contable`
-   - **Runtime:** Python 3
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `python main.py`
-5. Haz clic en **Create Background Worker**.
+Solo disponibles para **administradores** del grupo.
 
-> **¿Por qué Background Worker y no Web Service?**  
-> Los Web Services gratuitos en Render se "duermen" tras 15 minutos de inactividad. Un Background Worker corre 24/7 de forma continua y es ideal para bots con polling.
-
----
-
-## Paso 9 — Configurar las variables de entorno en Render
-
-1. En el dashboard de Render, abre tu servicio.
-2. Ve a la pestaña **Environment**.
-3. Añade estas variables (una por una):
-
-| Variable | Valor |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | El token de BotFather |
-| `TELEGRAM_GROUP_ID` | El chat ID negativo del grupo |
-| `SUPABASE_URL` | La Project URL de Supabase |
-| `SUPABASE_KEY` | La clave anon de Supabase |
-
-4. Haz clic en **Save Changes**. Render reiniciará el bot automáticamente.
-
----
-
-## Uso del bot
-
-### Registrar pedidos
-El bot escucha automáticamente. Cada vez que el bot de pedidos publique un mensaje con el formato `🧾 Pedido #`, se guarda en Supabase sin que tengas que hacer nada.
-
-### Asignar mensajero
-Haz **reply** al mensaje del pedido y escribe:
 ```
-/mensajero Juan
-```
-
-### Consultar estadísticas
-```
-/stats hoy          → pedidos del día de hoy
-/stats mes          → pedidos del mes actual
-/stats negocios     → facturación por negocio del mes
+/stats hoy              → pedidos del día, mensajerías, total
+/stats mes              → mismo pero del mes actual
+/stats negocios         → facturación por negocio del mes
 /stats mensajero Juan   → pedidos y ganancias de Juan en el mes
-/stats mensajeros   → ranking de todos los mensajeros del mes
+/stats mensajeros       → ranking de todos los mensajeros
+/mensajero Juan         → (reply a un pedido) asigna el mensajero
 ```
-
-> Solo los **administradores del grupo** pueden usar estos comandos.
 
 ---
 
-## Solución de problemas
+## Deploy en fps.ms
 
-**El bot no detecta los pedidos**  
-- Verifica que el bot sea administrador del grupo.
-- Comprueba que `TELEGRAM_GROUP_ID` sea el número correcto (negativo).
-- Revisa los logs en Render → pestaña **Logs**.
+1. Sube los archivos desde tu repo de GitHub.
+2. El comando de inicio es: `python main.py`
+3. Configura las variables de entorno en el panel de fps.ms:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_GROUP_ID`
+   - `SUPABASE_URL`
+   - `SUPABASE_KEY`
+   - `API_SECRET_KEY`
+   - `PORT` (fps.ms generalmente lo inyecta solo)
+4. El bot expone el endpoint HTTP en el puerto asignado por fps.ms.
 
-**Error de Supabase**  
-- Verifica que las tablas estén creadas (Paso 5).
-- Confirma que `SUPABASE_URL` y `SUPABASE_KEY` sean correctas.
+---
 
-**Los comandos no responden**  
-- Solo funcionan desde el grupo configurado en `TELEGRAM_GROUP_ID`.
-- Solo los admins pueden usarlos — verifica que tu usuario sea admin.
+## Archivos del proyecto
+
+| Archivo | Función |
+|---|---|
+| `main.py` | Orquesta FastAPI + bot polling en un solo proceso asyncio |
+| `api.py` | Endpoint `POST /pedido` y modelo Pydantic |
+| `formatter.py` | Convierte el JSON del pedido al formato de mensaje de Telegram |
+| `database.py` | Operaciones Supabase con reintentos automáticos |
+| `requirements.txt` | Dependencias |
+| `.env.example` | Plantilla de variables de entorno |
